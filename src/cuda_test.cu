@@ -42,6 +42,10 @@ struct Color
         }
         return 'b';
     }
+    __device__ int Sum()
+    {
+        return r+b+g;
+    }
 };
 
 struct Point
@@ -107,7 +111,15 @@ struct Point
 
 
 
-
+std::vector<std::string> MakeArgvIntoString(int argc, char** argv)
+{
+    std::vector<std::string> args;
+    for(int i=0;i<argc;i++)
+    {
+        args.push_back(argv[i]);
+    }
+    return args;
+}
 
 __global__ void test_fun(unsigned char* input, ImgData data)
 {
@@ -330,6 +342,76 @@ __global__ void MinColor(Color* input,Color* output, ImgData data)
 
 }
 
+
+
+__global__ void DiffTreshhold(Color* input,Color* output, ImgData data,int threshold)
+{
+    //Step so threads won't overlap
+    int step = blockDim.x * gridDim.x;
+    //Starting possition for thread
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    //long int size = data.height*data.width;
+    for(int i=tid;i<data.height*data.width;i+=step)
+    {
+        bool done=false;
+        Point pos = {.x=i % data.width, .y=i / data.width};
+        Point neighbours[8];
+        for(int j=0;j<8;j++)
+        {
+            neighbours[j]={-1,-1};
+        }
+
+        pos.GetNeighbours(data.width,data.height,neighbours);
+
+
+        for(int j=0;j<8;j++)
+        {
+            if(neighbours[j].x==-1)
+            {
+                continue;
+            }
+            if(abs(input[i].Sum()-input[neighbours[j].y*data.width+neighbours[j].x].Sum())>=threshold)
+            {
+                output[i].r=255;
+                output[i].g=255;
+                output[i].b=255;
+                done=true;
+                break;
+            }
+        }        
+        if(done)
+        {
+            continue;
+        }
+        output[i].r=0;
+        output[i].g=0;
+        output[i].b=0;
+
+    }
+
+}
+
+__global__ void Test(Color* input,Color* output, ImgData data,int threshold)
+{
+    //Step so threads won't overlap
+    int step = blockDim.x * gridDim.x;
+    //Starting possition for thread
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    //long int size = data.height*data.width;
+    for(int i=tid;i<data.height*data.width;i+=step)
+    {
+        
+        output[i].r=0;
+        output[i].g=0;
+        output[i].b=0;
+
+    }
+
+}
+
+
 void what_it_does(cv::Mat& input, cv::Mat& output)
 {
     //Step stores number of bytes that one row takes, rows stores how many rows matrix has;
@@ -432,6 +514,47 @@ void what_it_does2(cv::Mat& input, cv::Mat& output)
     {
         std::cout << "CUDA: " << cudaGetErrorName(res) << std::endl;
     }
+
+    
+    cudaMemcpy(output.ptr(),d_output,colorBytes,cudaMemcpyDeviceToHost);
+    cudaFree(d_input);
+    cudaFree(d_output);
+
+
+}
+
+void DiffTreshhold(cv::Mat& input, cv::Mat& output,int threshold)
+{
+    //Step stores number of bytes that one row takes, rows stores how many rows matrix has;
+    int colorBytes = input.step * input.rows;
+    //int dimmensions = input.rows * input.cols; 
+
+
+    Color *d_input;
+    Color *d_output;
+
+	// Allocate device memory
+    cudaMalloc<Color>(&d_input,colorBytes);
+    cudaMalloc<Color>(&d_output,colorBytes);
+
+	// Copy data from OpenCV input image to device memory
+    cudaMemcpy(d_input,input.ptr(),colorBytes,cudaMemcpyHostToDevice);
+    
+    ImgData data = {input.cols,input.rows,input.step};
+
+    //DomOnly<<<GRID_SIZE,BLOCK_SIZE>>>(d_input,d_output,data);
+    //MaxColor<<<GRID_SIZE,BLOCK_SIZE>>>(d_input,d_output,data);
+    //MinColor<<<GRID_SIZE,BLOCK_SIZE>>>(d_input,d_output,data);
+
+    DiffTreshhold<<<GRID_SIZE,BLOCK_SIZE>>>(d_input,d_output,data,threshold);
+    //Test<<<GRID_SIZE,BLOCK_SIZE>>>(d_input,d_output,data,threshold);
+
+    cudaError res = cudaDeviceSynchronize();
+    if(res)
+    {
+        std::cout << "CUDA: " << cudaGetErrorName(res) << std::endl;
+    }
+    
     
     cudaMemcpy(output.ptr(),d_output,colorBytes,cudaMemcpyDeviceToHost);
     cudaFree(d_input);
@@ -444,14 +567,20 @@ void what_it_does2(cv::Mat& input, cv::Mat& output)
 
 int main(int argc, char** argv)
 {
+    std::vector<std::string> args = MakeArgvIntoString(argc,argv);
     int cudaDevices;
+    bool show = false;
+    int threshold = 0;
     cudaGetDeviceCount(&cudaDevices);
     std::cout << "Cuda devices found: " << cudaDevices << std::endl;
-    if(argc<2)
+    if(args.size()<2)
     {
-        std::cout << "Usage " << argv[0] << " path/to/img" << std::endl;
+        std::cout << "Usage " << args[0] << " path/to/img" << std::endl;
     }
-    if(argc>2)
+
+	std::string imagePath = args[1];
+
+    if(args.size()>2)
     {
         cudaDeviceProp dev_prop;
         cudaGetDeviceProperties(&dev_prop,0);
@@ -460,24 +589,82 @@ int main(int argc, char** argv)
         //std::cout << "Max Grid Size: " << dev_prop.maxGridSize[0]  << std::endl;
         //std::cout << "Max Grid Size (2D): " << dev_prop.maxGridSize[1]  << std::endl;
         //std::cout << "Max Grid Size (3D): " << dev_prop.maxGridSize[2]  << std::endl;
-        BLOCK_SIZE = std::atoi(argv[2]);
-        if(BLOCK_SIZE>dev_prop.maxThreadsPerBlock)
+        for(int i = 2;i<argc;i++)
         {
-            std::cout<<"CUDA: Can't use " << BLOCK_SIZE << " threads in block, changed to " << dev_prop.maxThreadsPerBlock << " instead\n";
-            BLOCK_SIZE = dev_prop.maxThreadsPerBlock;
+            //std::cout << args[i] << std::endl;
+            if(args[i]=="-t" || args[i]=="--threads" )
+            {
+                if(++i<argc && args[i][0]!='-')
+                {
+                    BLOCK_SIZE = std::stoi(args[i]);
+                    if(BLOCK_SIZE>dev_prop.maxThreadsPerBlock)
+                    {
+                        std::cout<<"CUDA: Can't use " << BLOCK_SIZE << " threads in block, changed to " << dev_prop.maxThreadsPerBlock << " instead\n";
+                        BLOCK_SIZE = dev_prop.maxThreadsPerBlock;
+                    }
+                }
+                else
+                {
+                    std::cout<<"Didn't provided number of threads. Skipping...\n";
+                }
+                continue;
+            }
+            if(args[i]=="-th" || args[i]=="--threshold")
+            {
+                if(++i<argc && args[i][0]!='-')
+                {
+                    threshold = std::stoi(args[i]);
+                    if(threshold>3*255)
+                    {
+                        std::cout<<"Max possible threshold " << 3*255 << std::endl;
+                        threshold = 3*255;
+                    }
+                }
+                else
+                {
+                    std::cout<<"Didn't provided number of threads. Skipping...\n";
+                }
+                continue;
+
+            }
+            if(args[i]=="-gs" || args[i]=="--gridsize" )
+            {
+                if(++i<argc && args[i][0]!='-')
+                {
+                    GRID_SIZE = std::stoi(args[i]);
+                    if(GRID_SIZE>dev_prop.maxGridSize[0])
+                    {
+                        std::cout<<"CUDA: Can't use " << GRID_SIZE << " threads in block, changed to " << dev_prop.maxGridSize[0] << " instead\n";
+                        GRID_SIZE = dev_prop.maxGridSize[0];
+                    }
+                }
+                else
+                {
+                    std::cout<<"Didn't provided number of threads. Skipping...\n";
+                }
+                continue;
+            }
+            if(args[i]=="-s" || args[i]=="--show")
+            {
+                show = true;
+                continue;
+            }
         }
     }
     
-	std::string imagePath = argv[1];
 
     cv::Mat input = cv::imread(imagePath,cv::IMREAD_COLOR);
 	cv::Mat output(input.rows,input.cols,CV_8UC3);
 
 
-    //cv::imshow("Before",input);
-    //what_it_does(input,output);
-    what_it_does2(input,output);
-    //cv::imshow("After",output);
+    if(show)
+        cv::imshow("Before",input);
+    
+    //what_it_does2(input,output);
+    DiffTreshhold(input,output,threshold);
+
+    if(show)
+        cv::imshow("After",output);
 
     // bool run=true;
     // while(run)
@@ -494,7 +681,8 @@ int main(int argc, char** argv)
     //     }
     // }
 
-    cv::waitKey();
+    if(show)
+        cv::waitKey();
 
     //std::cout<< CUDA_VERSION << std::endl;
     //std::cout<< CUDART_VERSION << std::endl;
